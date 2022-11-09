@@ -25,7 +25,8 @@ import { concatMap, delay, filter, from, map, of } from 'rxjs';
 export class FinancialChartComponent implements OnInit {
   @ViewChild(BaseChartDirective) chart?: BaseChartDirective;
   isBacktest = true;
-  private readonly delayTime = 1000;
+  skipGraph = false;
+  delayTime = 100;
   profitTarget = 0.005;
   stopLoss = 0.005;
   barCount = 120;
@@ -112,8 +113,11 @@ export class FinancialChartComponent implements OnInit {
               this.chart?.data?.datasets[0].data as FinancialDataPoint[]
             );
 
-            if (!this.hasPosition) {
-              this.entryPoint = this.findEntryPoint(firstPart, lines);
+            if (!this.hasPosition && this.chart?.data?.datasets[0].data) {
+              this.entryPoint = this.findEntryPoint(
+                this.chart.data.datasets[0].data as FinancialDataPoint[],
+                lines
+              );
             }
 
             this.paperTrade(candle, candles[0]);
@@ -248,12 +252,12 @@ export class FinancialChartComponent implements OnInit {
       this.chart?.data?.datasets?.push({
         type: 'line',
         label: `Entry point`,
-        backgroundColor: 'rgba(0, 255, 0, 0.3)',
-        borderColor: 'rgba(0, 255, 0, 0.8)',
-        pointBackgroundColor: 'rgba(0, 255, 0, 0.8)',
+        backgroundColor: 'rgba(255, 192, 0, 0.3)',
+        borderColor: 'rgba(255, 192, 0, 0.8)',
+        pointBackgroundColor: 'rgba(255, 192, 0, 0.8)',
         pointBorderColor: '#fff',
         pointHoverBackgroundColor: '#fff',
-        pointHoverBorderColor: 'rgba(0, 255, 0, 0.8)',
+        pointHoverBorderColor: 'rgba(255, 192, 0, 0.8)',
         borderWidth: 4,
         fill: false,
         data: [
@@ -295,7 +299,7 @@ export class FinancialChartComponent implements OnInit {
       this.chart?.data?.datasets?.push({
         type: 'line',
         label: `Stop Loss order`,
-        borderColor: 'purple',
+        borderColor: 'darkred',
         borderWidth: 4,
         fill: false,
         data: [
@@ -324,7 +328,7 @@ export class FinancialChartComponent implements OnInit {
       );
     }
 
-    this.chart?.chart?.update();
+    this.skipGraph ? undefined : this.chart?.chart?.update();
   }
 
   mapStream(candle: string[]): FinancialDataPoint {
@@ -342,10 +346,12 @@ export class FinancialChartComponent implements OnInit {
       .filter((candlestick) => candlestick.x > 0)
       .filter((value, index, array) => {
         if (
-          index > 0 &&
-          index < array.length - 2 &&
+          index > 1 &&
+          index < array.length - 3 &&
+          array[index - 2].l >= value.l &&
           array[index - 1].l >= value.l &&
-          array[index + 1].l > value.l
+          array[index + 1].l > value.l &&
+          array[index + 2].l > value.l
         ) {
           return true;
         }
@@ -356,10 +362,12 @@ export class FinancialChartComponent implements OnInit {
     const resistanceLines = candles
       .filter((value, index, array) => {
         if (
-          index > 0 &&
-          index < array.length - 2 &&
+          index > 1 &&
+          index < array.length - 3 &&
+          array[index - 2].h <= value.h &&
           array[index - 1].h <= value.h &&
-          array[index + 1].h < value.h
+          array[index + 1].h < value.h &&
+          array[index + 2].h < value.h
         ) {
           return true;
         }
