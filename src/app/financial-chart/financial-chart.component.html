@@ -2,11 +2,13 @@
   {{ now }}
 </div>
 
-<div class="clock">
-  {{ hasPosition }}
-</div>
+<div class="clock">Backtest: {{ isBacktest }}</div>
 
-<div class="clock">USD {{ runningPnl | number: "1.2-2" }}</div>
+<div class="clock">Position: {{ hasPosition }}</div>
+
+<div class="clock">Current PnL: USD {{ currentPnl | number: "1.2-2" }}</div>
+<div class="clock">Running PnL: USD {{ runningPnl | number: "1.2-2" }}</div>
+<div class="clock">Hold PnL: USD {{ holdPnl | number: "1.2-2" }}</div>
 
 <div class="chart">
   <canvas

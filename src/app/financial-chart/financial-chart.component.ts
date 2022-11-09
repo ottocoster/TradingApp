@@ -15,7 +15,7 @@ import {
   OhlcElement,
 } from 'chartjs-chart-financial';
 import { QuotesService } from '../quotes.service';
-import { delay, filter, map } from 'rxjs';
+import { concatMap, delay, filter, from, map, of } from 'rxjs';
 
 @Component({
   selector: 'app-financial-chart',
@@ -24,14 +24,18 @@ import { delay, filter, map } from 'rxjs';
 })
 export class FinancialChartComponent implements OnInit {
   @ViewChild(BaseChartDirective) chart?: BaseChartDirective;
+  isBacktest = true;
+  private readonly delayTime = 1000;
   profitTarget = 0.005;
   stopLoss = 0.005;
-  barCount = 240;
+  barCount = 120;
   hasPosition = false;
   openOrder: number | undefined;
   takeProfitOrder: number | undefined;
   entryPoint: FinancialDataPoint | undefined;
-  runningPnl: number | undefined;
+  runningPnl = 0;
+  currentPnl = 0;
+  holdPnl = 0;
   stopLossOrder: number | undefined;
   now = new Date().toLocaleTimeString();
   public financialChartType: ChartType = 'candlestick';
@@ -58,7 +62,7 @@ export class FinancialChartComponent implements OnInit {
       },
     },
     borderColor: 'black',
-    backgroundColor: 'rgba(255,0,0,0,0.3)',
+    backgroundColor: 'rgba(255,0,0,0,0.2)',
     plugins: {
       legend: {
         display: true,
@@ -76,18 +80,47 @@ export class FinancialChartComponent implements OnInit {
   }
 
   ngOnInit(): void {
-    setInterval(() => {
-      this.now = new Date().toLocaleTimeString();
-    }, 1000);
+    this.quotesService.getQuotes().subscribe((candles) => {
+      if (!this.isBacktest) {
+        setInterval(() => {
+          this.now = new Date().toLocaleTimeString();
+        }, 1000);
 
-    this.quotesService
-      .getQuotes()
-      .pipe(delay(2000))
-      .subscribe((candles) => {
         this.renderHistoricalPrices(candles);
 
         this.quotesService.startStreamingQuotes();
-      });
+      } else {
+        // Start backtesting
+        // Take first part of data for finding support and resistance
+        this.renderHistoricalPrices(candles);
+        const firstPart = candles.slice(0, this.barCount);
+        const lastPart = candles.slice(this.barCount);
+        const lines = this.findSupportAndResistance(firstPart);
+
+        this.chart?.data?.datasets
+          ? (this.chart.data.datasets = [])
+          : undefined;
+
+        this.renderHistoricalPrices(firstPart);
+
+        from(lastPart)
+          .pipe(concatMap((val) => of(val).pipe(delay(this.delayTime))))
+          .subscribe((candle) => {
+            this.now = new Date(candle.x).toLocaleTimeString();
+
+            const lines = this.findSupportAndResistance(
+              this.chart?.data?.datasets[0].data as FinancialDataPoint[]
+            );
+
+            if (!this.hasPosition) {
+              this.entryPoint = this.findEntryPoint(firstPart, lines);
+            }
+
+            this.paperTrade(candle, candles[0]);
+            this.renderGraph(candle, lines);
+          });
+      }
+    });
 
     this.quotesService.streamingQuotes$
       .pipe(
@@ -107,44 +140,55 @@ export class FinancialChartComponent implements OnInit {
           return this.mapStream(message[1]);
         })
       )
-      .subscribe((message) => {
-        this.renderGraph(message);
+      .subscribe((candle) => {
+        const lines = this.findSupportAndResistance(
+          this.chart?.data?.datasets[0].data as FinancialDataPoint[]
+        );
+
+        if (!this.entryPoint) {
+          this.entryPoint = this.findEntryPoint(
+            this.chart?.data?.datasets[0].data as FinancialDataPoint[],
+            lines
+          );
+        }
+
+        this.paperTrade(candle);
+
+        this.renderGraph(candle, lines);
       });
   }
 
   renderHistoricalPrices(candles: FinancialDataPoint[]) {
     this.chart?.data?.datasets?.push({
       label: 'XBT/USD',
-      data: candles.slice(-this.barCount),
+      data: candles,
     });
-    this.chart?.chart?.update();
+    this.updateChart();
   }
 
-  renderGraph(message: FinancialDataPoint) {
+  renderGraph(
+    candle: FinancialDataPoint,
+    lines: {
+      supportLines: FinancialDataPoint[];
+      resistanceLines: FinancialDataPoint[];
+    }
+  ) {
     const oldData = this.chart?.data?.datasets[0].data as FinancialDataPoint[];
     const sameEndTime = oldData?.findIndex(
-      (candle) => (candle as FinancialDataPoint).x === message.x
+      (oldCandle) => (oldCandle as FinancialDataPoint).x === candle.x
     );
 
     if (sameEndTime && sameEndTime > -1 && oldData) {
-      oldData[sameEndTime] = message;
+      oldData[sameEndTime] = candle;
     } else {
-      oldData?.push(message);
+      oldData?.push(candle);
     }
 
     this.chart?.data?.datasets ? (this.chart.data.datasets = []) : undefined;
 
-    const lines = this.findSupportAndResistance(oldData);
-
-    if (!this.entryPoint?.c) {
-      this.entryPoint = this.findEntryPoint(oldData, lines);
-    }
-
-    this.paperTrade(message);
-
     this.chart?.data?.datasets?.push({
       label: 'XBT/USD',
-      data: oldData!.slice(-this.barCount),
+      data: oldData,
     });
 
     !this.takeProfitOrder &&
@@ -267,6 +311,19 @@ export class FinancialChartComponent implements OnInit {
       });
     }
 
+    this.updateChart();
+  }
+
+  private updateChart() {
+    if (
+      this.chart?.data?.datasets[0]?.data?.length &&
+      this.chart?.data?.datasets[0]?.data?.length > this.barCount
+    ) {
+      this.chart.data.datasets[0].data = this.chart.data.datasets[0].data.slice(
+        -this.barCount
+      );
+    }
+
     this.chart?.chart?.update();
   }
 
@@ -379,9 +436,49 @@ export class FinancialChartComponent implements OnInit {
     return closestSupportLine;
   }
 
-  paperTrade(lastCandle: FinancialDataPoint) {
+  paperTrade(lastCandle: FinancialDataPoint, firstCandle?: FinancialDataPoint) {
+    this.holdPnl = (firstCandle && lastCandle.c - firstCandle?.c) ?? 0;
+
     if (this.hasPosition && this.openOrder) {
-      this.runningPnl = lastCandle.c - this.openOrder;
+      this.currentPnl = lastCandle.c - this.openOrder;
+    }
+
+    if (
+      this.openOrder &&
+      this.hasPosition &&
+      this.takeProfitOrder &&
+      lastCandle.h >= this.takeProfitOrder
+    ) {
+      console.log(
+        `Take profit order filled at ${this.takeProfitOrder} at ${new Date(
+          lastCandle.x
+        ).toLocaleTimeString()}`
+      );
+
+      this.runningPnl += this.takeProfitOrder - this.openOrder;
+
+      this.reset();
+
+      return;
+    }
+
+    if (
+      this.openOrder &&
+      this.hasPosition &&
+      this.stopLossOrder &&
+      lastCandle.l <= this.stopLossOrder
+    ) {
+      console.log(
+        `Stop loss order filled at ${this.stopLossOrder} at ${new Date(
+          lastCandle.x
+        ).toLocaleTimeString()}`
+      );
+
+      this.runningPnl += this.stopLossOrder - this.openOrder;
+
+      this.reset();
+
+      return;
     }
 
     if (
@@ -394,9 +491,21 @@ export class FinancialChartComponent implements OnInit {
       this.takeProfitOrder = this.entryPoint.l * (1 + this.profitTarget);
       this.stopLossOrder = this.entryPoint.l * (1 - this.stopLoss);
 
-      console.log(`Buy order filled at ${this.openOrder}`);
-      console.log(`Creating take profit order at ${this.takeProfitOrder}`);
-      console.log(`Creating stop loss order at ${this.stopLossOrder}`);
+      console.log(
+        `Buy order filled at ${this.openOrder} at ${new Date(
+          lastCandle.x
+        ).toLocaleTimeString()}`
+      );
+      console.log(
+        `Creating take profit order at ${this.takeProfitOrder} at ${new Date(
+          lastCandle.x
+        ).toLocaleTimeString()}`
+      );
+      console.log(
+        `Creating stop loss order at ${this.stopLossOrder} at ${new Date(
+          lastCandle.x
+        ).toLocaleTimeString()}`
+      );
 
       return;
     }
@@ -408,11 +517,20 @@ export class FinancialChartComponent implements OnInit {
       this.entryPoint &&
       (!this.openOrder || this.openOrder !== this.entryPoint.l)
     ) {
-      console.log(`Creating buy order at ${this.entryPoint.l}`);
+      console.log(
+        `Creating buy order at ${this.entryPoint.l} at ${new Date(
+          lastCandle.x
+        ).toLocaleTimeString()}`
+      );
 
       this.openOrder = this.entryPoint.l;
-
-      this.entryPoint = undefined;
     }
+  }
+
+  private reset() {
+    this.takeProfitOrder = undefined;
+    this.stopLossOrder = undefined;
+    this.hasPosition = false;
+    this.openOrder = undefined;
   }
 }
