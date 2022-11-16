@@ -31,7 +31,7 @@ export class FinancialChartComponent implements OnInit {
   @ViewChild(BaseChartDirective) chart?: BaseChartDirective;
   isBacktest = true; // Set to false for live trading
   skipGraph = false; // Optional, to not update the graph when backtesting
-  stepTime = 2000; // Milliseconds waiting time after each step when backtesting
+  stepTime = 100; // Milliseconds waiting time after each step when backtesting
   profitTarget = 0.005; // Percentage in decimal notation
   stopLoss = 0.005; // Percentage in decimal notation
   barCount = 120; // Maximum of bars displayed in the graph
