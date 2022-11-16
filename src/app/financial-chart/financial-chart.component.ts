@@ -1,21 +1,21 @@
 import { Component, OnInit, ViewChild } from '@angular/core';
-import 'chartjs-adapter-date-fns';
-import { BaseChartDirective } from 'ng2-charts';
 import {
   Chart,
   ChartConfiguration,
   ChartType,
   FinancialDataPoint,
 } from 'chart.js';
-import { enUS } from 'date-fns/locale';
+import 'chartjs-adapter-date-fns';
 import {
   CandlestickController,
   CandlestickElement,
   OhlcController,
   OhlcElement,
 } from 'chartjs-chart-financial';
-import { QuotesService, symbol } from '../quotes.service';
+import { enUS } from 'date-fns/locale';
+import { BaseChartDirective } from 'ng2-charts';
 import { concatMap, delay, filter, from, map, of } from 'rxjs';
+import { QuotesService, symbol } from '../quotes.service';
 import {
   findEntryPointLong,
   findEntryPointShort,
@@ -29,12 +29,12 @@ import {
 })
 export class FinancialChartComponent implements OnInit {
   @ViewChild(BaseChartDirective) chart?: BaseChartDirective;
-  isBacktest = true;
-  skipGraph = false;
-  delayTime = 2000; // Milliseconds
+  isBacktest = true; // Set to false for live trading
+  skipGraph = false; // Optional, to not update the graph when backtesting
+  stepTime = 2000; // Milliseconds waiting time after each step when backtesting
   profitTarget = 0.005; // Percentage in decimal notation
   stopLoss = 0.005; // Percentage in decimal notation
-  barCount = 120;
+  barCount = 120; // Maximum of bars displayed in the graph
   hasPosition = false;
   openOrderLong: number | undefined;
   openOrderShort: number | undefined;
@@ -42,9 +42,9 @@ export class FinancialChartComponent implements OnInit {
   takeProfitOrderShort: number | undefined;
   entryPointLong: FinancialDataPoint | undefined;
   entryPointShort: FinancialDataPoint | undefined;
-  runningPnl = 0;
-  currentPnl = 0;
-  holdPnl = 0;
+  runningPnl = 0; // Running profit and loss this session
+  currentPnl = 0; // Current trade profit and loss
+  holdPnl = 0; // Buy and hold profit and loss, used as benchmark
   stopLossOrderLong: number | undefined;
   stopLossOrderShort: number | undefined;
   now = new Date().toLocaleTimeString();
@@ -100,27 +100,21 @@ export class FinancialChartComponent implements OnInit {
   subscribeToHistoricalPrices() {
     this.quotesService.getHistoricalPrices().subscribe((candles) => {
       if (!this.isBacktest) {
-        // Start live trading
+        // Live trading
         this.startLiveTrading(candles);
       } else {
-        // Start backtesting
-        // Take first part of data for finding support and resistance
-        this.renderHistoricalPrices(candles);
+        // Backtesting
+        // Take first part of historical prices for finding support and resistance
         const firstPart = candles.slice(0, this.barCount);
         const lastPart = candles.slice(this.barCount);
-        const lines = findSupportAndResistance(firstPart);
-
-        this.chart?.data?.datasets
-          ? (this.chart.data.datasets = [])
-          : undefined;
 
         this.renderHistoricalPrices(firstPart);
 
+        // Take last part of historical prices for backtesting
+        // Create stream which emits one candle every stepTime milliseconds
         from(lastPart)
-          .pipe(concatMap((val) => of(val).pipe(delay(this.delayTime))))
+          .pipe(concatMap((candle) => of(candle).pipe(delay(this.stepTime))))
           .subscribe((candle) => {
-            this.now = new Date(candle.x).toLocaleTimeString();
-
             const lines = findSupportAndResistance(
               this.chart?.data?.datasets[0].data as FinancialDataPoint[]
             );
@@ -130,6 +124,7 @@ export class FinancialChartComponent implements OnInit {
               this.entryPointShort = findEntryPointShort(candle, lines);
             }
 
+            this.renderHistoricalClock(candle);
             this.paperTrade(candle, candles[0]);
             this.renderGraph(candle, lines);
           });
@@ -167,20 +162,25 @@ export class FinancialChartComponent implements OnInit {
         }
 
         this.paperTrade(candle);
-
         this.renderGraph(candle, lines);
       });
   }
 
   startLiveTrading(candles: FinancialDataPoint[]) {
-    // Render live clock
+    this.renderLiveClock();
+    this.renderHistoricalPrices(candles);
+    this.quotesService.startStreamingLivePrices();
+  }
+
+  renderLiveClock() {
     setInterval(() => {
       this.now = new Date().toLocaleTimeString();
     }, 1000);
+  }
 
-    this.renderHistoricalPrices(candles);
-
-    this.quotesService.startStreamingLivePrices();
+  renderHistoricalClock(candle: FinancialDataPoint) {
+    // Set clock to historical candle time
+    this.now = new Date(candle.x).toLocaleTimeString();
   }
 
   renderHistoricalPrices(candles: FinancialDataPoint[]) {
@@ -200,6 +200,8 @@ export class FinancialChartComponent implements OnInit {
     }
   ) {
     const oldData = this.chart?.data?.datasets[0].data as FinancialDataPoint[];
+
+    // Update existing candle if the new candle has the same end time
     const sameEndTime = oldData?.findIndex(
       (oldCandle) => (oldCandle as FinancialDataPoint).x === candle.x
     );
@@ -217,6 +219,7 @@ export class FinancialChartComponent implements OnInit {
       data: oldData,
     });
 
+    // Draw support lines
     !this.takeProfitOrderShort &&
       lines.supportLines?.forEach((supportLine) =>
         this.chart?.data?.datasets?.push({
@@ -243,6 +246,7 @@ export class FinancialChartComponent implements OnInit {
         })
       );
 
+    // Draw resistance lines
     !this.takeProfitOrderLong &&
       lines.resistanceLines?.forEach((resistanceLine) =>
         this.chart?.data?.datasets?.push({
@@ -269,11 +273,11 @@ export class FinancialChartComponent implements OnInit {
         })
       );
 
-    // Draw entry point long
+    // Draw entry point LONG
     if (this.entryPointLong && !this.takeProfitOrderShort) {
       this.chart?.data?.datasets?.push({
         type: 'line',
-        label: `Entry point long`,
+        label: `Entry point LONG`,
         backgroundColor: 'rgba(255, 192, 0, 0.3)',
         borderColor: 'rgba(255, 192, 0, 0.8)',
         pointBackgroundColor: 'rgba(255, 192, 0, 0.8)',
@@ -294,10 +298,12 @@ export class FinancialChartComponent implements OnInit {
         ],
       });
     }
+
+    // Draw entry point SHORT
     if (this.entryPointShort && !this.takeProfitOrderLong) {
       this.chart?.data?.datasets?.push({
         type: 'line',
-        label: `Entry point short`,
+        label: `Entry point SHORT`,
         backgroundColor: 'rgba(255, 192, 0, 0.3)',
         borderColor: 'rgba(255, 192, 0, 0.8)',
         pointBackgroundColor: 'rgba(255, 192, 0, 0.8)',
@@ -324,6 +330,7 @@ export class FinancialChartComponent implements OnInit {
       this.chart?.data?.datasets?.push({
         type: 'line',
         label: `Take profit order LONG`,
+        backgroundColor: 'rgba(0, 255, 0, 0.3)',
         borderColor: 'lightgreen',
         borderWidth: 4,
         fill: false,
@@ -345,6 +352,7 @@ export class FinancialChartComponent implements OnInit {
       this.chart?.data?.datasets?.push({
         type: 'line',
         label: `Take profit order SHORT`,
+        backgroundColor: 'rgba(0, 255, 0, 0.3)',
         borderColor: 'lightgreen',
         borderWidth: 4,
         fill: false,
@@ -366,6 +374,7 @@ export class FinancialChartComponent implements OnInit {
       this.chart?.data?.datasets?.push({
         type: 'line',
         label: `Stop Loss order LONG`,
+        backgroundColor: 'rgba(255, 0, 0, 0.3)',
         borderColor: 'darkred',
         borderWidth: 4,
         fill: false,
@@ -387,6 +396,7 @@ export class FinancialChartComponent implements OnInit {
       this.chart?.data?.datasets?.push({
         type: 'line',
         label: `Stop Loss order SHORT`,
+        backgroundColor: 'rgba(255, 0, 0, 0.3)',
         borderColor: 'darkred',
         borderWidth: 4,
         fill: false,
@@ -436,10 +446,15 @@ export class FinancialChartComponent implements OnInit {
       this.takeProfitOrderLong &&
       lastCandle.h >= this.takeProfitOrderLong
     ) {
+      // console.log(
+      //   `Take profit order LONG filled at ${
+      //     this.takeProfitOrderLong
+      //   } at ${new Date(lastCandle.x).toLocaleTimeString()}`
+      // );
+
       console.log(
-        `Take profit order LONG filled at ${
-          this.takeProfitOrderLong
-        } at ${new Date(lastCandle.x).toLocaleTimeString()}`
+        'LONG order profit:',
+        this.takeProfitOrderLong - this.openOrderLong
       );
 
       this.runningPnl += this.takeProfitOrderLong - this.openOrderLong;
@@ -455,10 +470,15 @@ export class FinancialChartComponent implements OnInit {
       this.takeProfitOrderShort &&
       lastCandle.l <= this.takeProfitOrderShort
     ) {
+      // console.log(
+      //   `Take profit order SHORT filled at ${
+      //     this.takeProfitOrderShort
+      //   } at ${new Date(lastCandle.x).toLocaleTimeString()}`
+      // );
+
       console.log(
-        `Take profit order SHORT filled at ${
-          this.takeProfitOrderShort
-        } at ${new Date(lastCandle.x).toLocaleTimeString()}`
+        'SHORT order profit:',
+        this.openOrderShort - this.takeProfitOrderShort
       );
 
       this.runningPnl += this.openOrderShort - this.takeProfitOrderShort;
@@ -474,10 +494,15 @@ export class FinancialChartComponent implements OnInit {
       this.stopLossOrderLong &&
       lastCandle.l <= this.stopLossOrderLong
     ) {
+      // console.log(
+      //   `Stop loss order LONG filled at ${this.stopLossOrderLong} at ${new Date(
+      //     lastCandle.x
+      //   ).toLocaleTimeString()}`
+      // );
+
       console.log(
-        `Stop loss order LONG filled at ${this.stopLossOrderLong} at ${new Date(
-          lastCandle.x
-        ).toLocaleTimeString()}`
+        'LONG order profit:',
+        this.stopLossOrderLong - this.openOrderLong
       );
 
       this.runningPnl += this.stopLossOrderLong - this.openOrderLong;
@@ -493,10 +518,15 @@ export class FinancialChartComponent implements OnInit {
       this.stopLossOrderShort &&
       lastCandle.h >= this.stopLossOrderShort
     ) {
+      // console.log(
+      //   `Stop loss order SHORT filled at ${
+      //     this.stopLossOrderShort
+      //   } at ${new Date(lastCandle.x).toLocaleTimeString()}`
+      // );
+
       console.log(
-        `Stop loss order SHORT filled at ${
-          this.stopLossOrderShort
-        } at ${new Date(lastCandle.x).toLocaleTimeString()}`
+        'SHORT order profit:',
+        this.openOrderShort - this.stopLossOrderShort
       );
 
       this.runningPnl += this.openOrderShort - this.stopLossOrderShort;
@@ -519,21 +549,21 @@ export class FinancialChartComponent implements OnInit {
       this.entryPointLong.x = lastCandle.x;
       this.entryPointLong.l = this.openOrderLong;
 
-      console.log(
-        `Buy order LONG filled at ${this.openOrderLong} at ${new Date(
-          lastCandle.x
-        ).toLocaleTimeString()}`
-      );
-      console.log(
-        `Creating take profit order LONG at ${
-          this.takeProfitOrderLong
-        } at ${new Date(lastCandle.x).toLocaleTimeString()}`
-      );
-      console.log(
-        `Creating stop loss order LONG at ${
-          this.stopLossOrderLong
-        } at ${new Date(lastCandle.x).toLocaleTimeString()}`
-      );
+      // console.log(
+      //   `Buy order LONG filled at ${this.openOrderLong} at ${new Date(
+      //     lastCandle.x
+      //   ).toLocaleTimeString()}`
+      // );
+      // console.log(
+      //   `Creating take profit order LONG at ${
+      //     this.takeProfitOrderLong
+      //   } at ${new Date(lastCandle.x).toLocaleTimeString()}`
+      // );
+      // console.log(
+      //   `Creating stop loss order LONG at ${
+      //     this.stopLossOrderLong
+      //   } at ${new Date(lastCandle.x).toLocaleTimeString()}`
+      // );
 
       return;
     }
@@ -551,21 +581,21 @@ export class FinancialChartComponent implements OnInit {
       this.entryPointShort.x = lastCandle.x;
       this.entryPointShort.h = this.openOrderShort;
 
-      console.log(
-        `Buy order SHORT filled at ${this.openOrderShort} at ${new Date(
-          lastCandle.x
-        ).toLocaleTimeString()}`
-      );
-      console.log(
-        `Creating take profit SHORT order at ${
-          this.takeProfitOrderShort
-        } at ${new Date(lastCandle.x).toLocaleTimeString()}`
-      );
-      console.log(
-        `Creating stop loss SHORT order at ${
-          this.stopLossOrderShort
-        } at ${new Date(lastCandle.x).toLocaleTimeString()}`
-      );
+      // console.log(
+      //   `Buy order SHORT filled at ${this.openOrderShort} at ${new Date(
+      //     lastCandle.x
+      //   ).toLocaleTimeString()}`
+      // );
+      // console.log(
+      //   `Creating take profit SHORT order at ${
+      //     this.takeProfitOrderShort
+      //   } at ${new Date(lastCandle.x).toLocaleTimeString()}`
+      // );
+      // console.log(
+      //   `Creating stop loss SHORT order at ${
+      //     this.stopLossOrderShort
+      //   } at ${new Date(lastCandle.x).toLocaleTimeString()}`
+      // );
 
       return;
     }
@@ -577,11 +607,11 @@ export class FinancialChartComponent implements OnInit {
       this.entryPointLong &&
       (!this.openOrderLong || this.openOrderLong !== this.entryPointLong.l)
     ) {
-      console.log(
-        `Creating buy order at ${this.entryPointLong.l} at ${new Date(
-          lastCandle.x
-        ).toLocaleTimeString()}`
-      );
+      // console.log(
+      //   `Creating buy order at ${this.entryPointLong.l} at ${new Date(
+      //     lastCandle.x
+      //   ).toLocaleTimeString()}`
+      // );
 
       this.openOrderLong = this.entryPointLong.l;
     }
@@ -593,11 +623,11 @@ export class FinancialChartComponent implements OnInit {
       this.entryPointShort &&
       (!this.openOrderShort || this.openOrderShort !== this.entryPointShort.h)
     ) {
-      console.log(
-        `Creating sell order at ${this.entryPointShort.h} at ${new Date(
-          lastCandle.x
-        ).toLocaleTimeString()}`
-      );
+      // console.log(
+      //   `Creating sell order at ${this.entryPointShort.h} at ${new Date(
+      //     lastCandle.x
+      //   ).toLocaleTimeString()}`
+      // );
 
       this.openOrderShort = this.entryPointShort.h;
     }
